@@ -95,13 +95,13 @@ import com.android.internal.telephony.Connection;
 import com.android.internal.telephony.LocaleTracker;
 import com.android.internal.telephony.Phone;
 import com.android.internal.telephony.PhoneConstants;
-import com.android.internal.telephony.PhoneInternalInterface;
 import com.android.internal.telephony.ServiceStateTracker;
 import com.android.internal.telephony.SubscriptionController;
 import com.android.internal.telephony.TelephonyProperties;
 import com.android.internal.telephony.dataconnection.DataEnabledSettings;
 import com.android.internal.telephony.dataconnection.DataEnabledSettings.DataEnabledChangedReason;
 import com.android.internal.telephony.gsm.SuppServiceNotification;
+import com.android.internal.telephony.imsphone.ImsPhone.ImsDialArgs;
 import com.android.internal.telephony.metrics.CallQualityMetrics;
 import com.android.internal.telephony.metrics.TelephonyMetrics;
 import com.android.internal.telephony.nano.TelephonyProto.ImsConnectionState;
@@ -301,6 +301,7 @@ public class ImsPhoneCallTracker extends CallTracker implements ImsPullCall {
     private static final int EVENT_REDIAL_WIFI_E911_TIMEOUT = 29;
     private static final int EVENT_ANSWER_WAITING_CALL = 30;
     private static final int EVENT_RESUME_NOW_FOREGROUND_CALL = 31;
+    private static final int EVENT_REDIAL_WITHOUT_RTT = 32;
 
     private static final int TIMEOUT_HANGUP_PENDINGMO = 500;
 
@@ -422,7 +423,8 @@ public class ImsPhoneCallTracker extends CallTracker implements ImsPullCall {
     private HoldSwapState mHoldSwitchingState = HoldSwapState.INACTIVE;
 
     private String mLastDialString = null;
-    private PhoneInternalInterface.DialArgs mLastDialArgs = null;
+    private ImsDialArgs mLastDialArgs = null;
+
     /**
      * Listeners to changes in the phone state.  Intended for use by other interested IMS components
      * without the need to register a full blown {@link android.telephony.PhoneStateListener}.
@@ -1948,6 +1950,9 @@ public class ImsPhoneCallTracker extends CallTracker implements ImsPullCall {
      */
     @VisibleForTesting
     public void addReasonCodeRemapping(Integer fromCode, String message, Integer toCode) {
+        if (message != null) {
+            message = message.toLowerCase();
+        }
         mImsReasonCodeMap.put(new Pair<>(fromCode, message), toCode);
     }
 
@@ -1966,6 +1971,8 @@ public class ImsPhoneCallTracker extends CallTracker implements ImsPullCall {
         String reason = reasonInfo.getExtraMessage();
         if (reason == null) {
             reason = "";
+        } else {
+            reason = reason.toLowerCase();
         }
         log("maybeRemapReasonCode : fromCode = " + reasonInfo.getCode() + " ; message = "
                 + reason);
@@ -2037,6 +2044,12 @@ public class ImsPhoneCallTracker extends CallTracker implements ImsPullCall {
             case ImsReasonInfo.CODE_SIP_NOT_ACCEPTABLE:
             case ImsReasonInfo.CODE_SIP_GLOBAL_ERROR:
                 return DisconnectCause.SERVER_ERROR;
+
+            case ImsReasonInfo.CODE_EMERGENCY_CALL_OVER_WFC_NOT_AVAILABLE:
+                return DisconnectCause.EMERGENCY_CALL_OVER_WFC_NOT_AVAILABLE;
+
+            case ImsReasonInfo.CODE_WFC_SERVICE_NOT_AVAILABLE_IN_THIS_LOCATION:
+                return DisconnectCause.WFC_SERVICE_NOT_AVAILABLE_IN_THIS_LOCATION;
 
             case ImsReasonInfo.CODE_SIP_SERVICE_UNAVAILABLE:
             case ImsReasonInfo.CODE_SIP_SERVER_ERROR:
@@ -2373,6 +2386,10 @@ public class ImsPhoneCallTracker extends CallTracker implements ImsPullCall {
                 final ConnectivityManager mgr = (ConnectivityManager) mPhone.getContext()
                         .getSystemService(Context.CONNECTIVITY_SERVICE);
                 mgr.setAirplaneMode(false);
+                return;
+            } else if (reasonInfo.getCode() == ImsReasonInfo.CODE_RETRY_ON_IMS_WITHOUT_RTT) {
+                Pair<ImsCall, ImsReasonInfo> callInfo = new Pair<>(imsCall, reasonInfo);
+                sendMessage(obtainMessage(EVENT_REDIAL_WITHOUT_RTT, callInfo));
                 return;
             } else {
                 processCallStateChange(imsCall, ImsPhoneCall.State.DISCONNECTED, cause);
@@ -3403,6 +3420,30 @@ public class ImsPhoneCallTracker extends CallTracker implements ImsPullCall {
                         .unregisterForNetworkAttached(this);
                 removeMessages(EVENT_REDIAL_WIFI_E911_CALL);
                 sendCallStartFailedDisconnect(callInfo.first, callInfo.second);
+                break;
+            }
+
+            case EVENT_REDIAL_WITHOUT_RTT: {
+                Pair<ImsCall, ImsReasonInfo> callInfo = (Pair<ImsCall, ImsReasonInfo>) msg.obj;
+                removeMessages(EVENT_REDIAL_WITHOUT_RTT);
+                ImsPhoneConnection oldConnection = findConnection(callInfo.first);
+                if (oldConnection == null) {
+                    sendCallStartFailedDisconnect(callInfo.first, callInfo.second);
+                    break;
+                }
+                mForegroundCall.detach(oldConnection);
+                removeConnection(oldConnection);
+                try {
+                    mPendingMO = null;
+                    ImsDialArgs newDialArgs = ImsDialArgs.Builder.from(mLastDialArgs)
+                            .setRttTextStream(null)
+                            .build();
+                    Connection newConnection =
+                            mPhone.getDefaultPhone().dial(mLastDialString, newDialArgs);
+                    oldConnection.onOriginalConnectionReplaced(newConnection);
+                } catch (CallStateException e) {
+                    sendCallStartFailedDisconnect(callInfo.first, callInfo.second);
+                }
                 break;
             }
         }

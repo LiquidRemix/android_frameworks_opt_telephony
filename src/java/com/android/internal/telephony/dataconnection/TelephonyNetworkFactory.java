@@ -181,9 +181,12 @@ public class TelephonyNetworkFactory extends NetworkFactory {
                                 DcTracker.DATA_COMPLETE_MSG_EXTRA_SUCCESS);
                         int transport = bundle.getInt(
                                 DcTracker.DATA_COMPLETE_MSG_EXTRA_TRANSPORT_TYPE);
+                        boolean fallback = bundle.getBoolean(
+                                DcTracker.DATA_COMPLETE_MSG_EXTRA_HANDOVER_FAILURE_FALLBACK);
                         HandoverParams handoverParams = mPendingHandovers.remove(msg);
                         if (handoverParams != null) {
-                            onDataHandoverSetupCompleted(nr, success, transport, handoverParams);
+                            onDataHandoverSetupCompleted(nr, success, transport, fallback,
+                                    handoverParams);
                         } else {
                             logl("Handover completed but cannot find handover entry!");
                         }
@@ -335,16 +338,16 @@ public class TelephonyNetworkFactory extends NetworkFactory {
                 if (dcTracker != null) {
                     DataConnection dc = dcTracker.getDataConnectionByApnType(
                             ApnSetting.getApnTypeString(apnType));
-                    if (dc != null && (dc.isActive() || dc.isActivating())) {
+                    if (dc != null && (dc.isActive())) {
                         Message onCompleteMsg = mInternalHandler.obtainMessage(
                                 EVENT_DATA_HANDOVER_COMPLETED);
                         onCompleteMsg.getData().putParcelable(
                                 DcTracker.DATA_COMPLETE_MSG_EXTRA_NETWORK_REQUEST, networkRequest);
                         mPendingHandovers.put(onCompleteMsg, handoverParams);
-                        // TODO: Need to handle the case that the request is there, but there is no
-                        // actual data connections established.
                         requestNetworkInternal(networkRequest, DcTracker.REQUEST_TYPE_HANDOVER,
                                 targetTransport, onCompleteMsg);
+                        log("Requested handover " + ApnSetting.getApnTypeString(apnType) + " to "
+                                + AccessNetworkConstants.transportTypeToString(targetTransport));
                         handoverPending = true;
                     } else {
                         // Request is there, but no actual data connection. In this case, just move
@@ -354,6 +357,7 @@ public class TelephonyNetworkFactory extends NetworkFactory {
                                 + "connection. Just move the request to transport "
                                 + AccessNetworkConstants.transportTypeToString(targetTransport)
                                 + ", dc=" + dc);
+                        entry.setValue(targetTransport);
                         releaseNetworkInternal(networkRequest, DcTracker.RELEASE_TYPE_NORMAL,
                                 currentTransport);
                         requestNetworkInternal(networkRequest, DcTracker.REQUEST_TYPE_NORMAL,
@@ -368,34 +372,37 @@ public class TelephonyNetworkFactory extends NetworkFactory {
 
         if (!handoverPending) {
             log("No handover request pending. Handover process is now completed");
-            handoverParams.callback.onCompleted(true);
+            handoverParams.callback.onCompleted(true, false);
         }
     }
 
     private void onDataHandoverSetupCompleted(NetworkRequest networkRequest, boolean success,
-                                              int targetTransport, HandoverParams handoverParams) {
+                                              int targetTransport, boolean fallback,
+                                              HandoverParams handoverParams) {
         log("onDataHandoverSetupCompleted: " + networkRequest + ", success=" + success
                 + ", targetTransport="
-                + AccessNetworkConstants.transportTypeToString(targetTransport));
+                + AccessNetworkConstants.transportTypeToString(targetTransport)
+                + ", fallback=" + fallback);
 
-        // At this point, handover setup has been completed on the target transport. No matter
-        // succeeded or not, remove the request from the source transport because even the setup
-        // failed on target transport, we can retry again there.
+        // At this point, handover setup has been completed on the target transport.
+        // If it succeeded, or it failed without falling back to the original transport,
+        // we should release the request from the original transport.
+        if (!fallback) {
+            int originTransport = (targetTransport == AccessNetworkConstants.TRANSPORT_TYPE_WWAN)
+                    ? AccessNetworkConstants.TRANSPORT_TYPE_WLAN
+                    : AccessNetworkConstants.TRANSPORT_TYPE_WWAN;
+            int releaseType = success
+                    ? DcTracker.RELEASE_TYPE_HANDOVER
+                    // If handover fails, we need to tear down the existing connection, so the
+                    // new data connection can be re-established on the new transport. If we leave
+                    // the existing data connection in current transport, then DCT and qualified
+                    // network service will be out of sync.
+                    : DcTracker.RELEASE_TYPE_NORMAL;
+            releaseNetworkInternal(networkRequest, releaseType, originTransport);
+            mNetworkRequests.put(networkRequest, targetTransport);
+        }
 
-        int originTransport = (targetTransport == AccessNetworkConstants.TRANSPORT_TYPE_WWAN)
-                ? AccessNetworkConstants.TRANSPORT_TYPE_WLAN
-                : AccessNetworkConstants.TRANSPORT_TYPE_WWAN;
-        int releaseType = success
-                ? DcTracker.RELEASE_TYPE_HANDOVER
-                // If handover fails, we need to tear down the existing connection, so the
-                // new data connection can be re-established on the new transport. If we leave
-                // the existing data connection in current transport, then DCT and qualified
-                // network service will be out of sync.
-                : DcTracker.RELEASE_TYPE_NORMAL;
-        releaseNetworkInternal(networkRequest, releaseType, originTransport);
-        mNetworkRequests.put(networkRequest, targetTransport);
-
-        handoverParams.callback.onCompleted(success);
+        handoverParams.callback.onCompleted(success, fallback);
     }
 
     protected void log(String s) {

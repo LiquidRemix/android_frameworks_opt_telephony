@@ -138,6 +138,11 @@ public class UiccProfile extends IccCard {
     private IccRecords mIccRecords = null;
     private IccCardConstants.State mExternalState = IccCardConstants.State.UNKNOWN;
 
+    // The number of UiccApplications modem reported. It's different from mUiccApplications.length
+    // which is always CARD_MAX_APPS, and only updated when modem sends an update, and NOT updated
+    // during SIM refresh. It's currently only used to help identify empty profile.
+    private int mLastReportedNumOfUiccApplications;
+
     private final ContentObserver mProvisionCompleteContentObserver =
             new ContentObserver(new Handler()) {
                 @Override
@@ -344,8 +349,8 @@ public class UiccProfile extends IccCard {
         String ccName = config.getString(CarrierConfigManager.KEY_CARRIER_NAME_STRING);
 
         String newCarrierName = null;
-        String currSpn = getServiceProviderName();
-        int nameSource = SubscriptionManager.NAME_SOURCE_SIM_SOURCE;
+        String currSpn = getServiceProviderName();  // Get the name from EF_SPN.
+        int nameSource = SubscriptionManager.NAME_SOURCE_SIM_SPN;
         // If carrier config is priority, use it regardless - the preference
         // and the name were both set by the carrier, so this is safe;
         // otherwise, if the SPN is priority but we don't have one *and* we have
@@ -354,10 +359,18 @@ public class UiccProfile extends IccCard {
             newCarrierName = ccName;
             nameSource = SubscriptionManager.NAME_SOURCE_CARRIER;
         } else if (TextUtils.isEmpty(currSpn)) {
-            // currSpn is empty and could not get name from carrier config; get name from carrier id
+            // currSpn is empty and could not get name from carrier config; get name from PNN or
+            // carrier id
             Phone phone = PhoneFactory.getPhone(mPhoneId);
             if (phone != null) {
-                newCarrierName = phone.getCarrierName();
+                String currPnn = phone.getPlmn();   // Get the name from EF_PNN.
+                if (!TextUtils.isEmpty(currPnn)) {
+                    newCarrierName = currPnn;
+                    nameSource = SubscriptionManager.NAME_SOURCE_SIM_PNN;
+                } else {
+                    newCarrierName = phone.getCarrierName();    // Get the name from carrier id.
+                    nameSource = SubscriptionManager.NAME_SOURCE_DEFAULT_SOURCE;
+                }
             }
         }
 
@@ -841,10 +854,11 @@ public class UiccProfile extends IccCard {
     public boolean isEmptyProfile() {
         // If there's no UiccCardApplication, it's an empty profile.
         // Empty profile is a valid case of eSIM (default boot profile).
-        for (UiccCardApplication app : mUiccApplications) {
-            if (app != null) return false;
-        }
-        return true;
+        // But we clear all apps of mUiccCardApplication to be null during refresh (see
+        // resetAppWithAid) but not mLastReportedNumOfUiccApplications.
+        // So if mLastReportedNumOfUiccApplications == 0, it means modem confirmed that we landed
+        // on empty profile.
+        return mLastReportedNumOfUiccApplications == 0;
     }
 
     @Override
@@ -941,6 +955,8 @@ public class UiccProfile extends IccCard {
 
             //update applications
             if (DBG) log(ics.mApplications.length + " applications");
+            mLastReportedNumOfUiccApplications = ics.mApplications.length;
+
             for (int i = 0; i < mUiccApplications.length; i++) {
                 if (mUiccApplications[i] == null) {
                     //Create newly added Applications

@@ -206,7 +206,7 @@ public class SubscriptionControllerTest extends TelephonyTest {
 
         /* Setting */
         String disName = "TESTING";
-        int nameSource = SubscriptionManager.NAME_SOURCE_SIM_SOURCE;
+        int nameSource = SubscriptionManager.NAME_SOURCE_SIM_SPN;
         mSubscriptionControllerUT.setDisplayNameUsingSrc(disName, subID, nameSource);
         SubscriptionInfo subInfo = mSubscriptionControllerUT
                 .getActiveSubscriptionInfo(subID, mCallingPackage);
@@ -469,12 +469,12 @@ public class SubscriptionControllerTest extends TelephonyTest {
 
         // Changing non-opportunistic sub1 shouldn't trigger callback.
         mSubscriptionControllerUT.setDisplayNameUsingSrc("DisplayName", 1,
-                SubscriptionManager.NAME_SOURCE_SIM_SOURCE);
+                SubscriptionManager.NAME_SOURCE_SIM_SPN);
         verify(mTelephonyRegisteryMock, times(1))
                 .notifyOpportunisticSubscriptionInfoChanged();
 
         mSubscriptionControllerUT.setDisplayNameUsingSrc("DisplayName", 2,
-                SubscriptionManager.NAME_SOURCE_SIM_SOURCE);
+                SubscriptionManager.NAME_SOURCE_SIM_SPN);
         verify(mTelephonyRegisteryMock, times(2))
                 .notifyOpportunisticSubscriptionInfoChanged();
     }
@@ -815,6 +815,7 @@ public class SubscriptionControllerTest extends TelephonyTest {
         mFakeTelephonyProvider.update(SubscriptionManager.CONTENT_URI, values,
                 SubscriptionManager.UNIQUE_KEY_SUBSCRIPTION_ID + "=" + 2, null);
         mSubscriptionControllerUT.refreshCachedActiveSubscriptionInfoList();
+        mSubscriptionControllerUT.notifySubscriptionInfoChanged();
 
         verify(mTelephonyRegisteryMock, times(1))
                 .notifyOpportunisticSubscriptionInfoChanged();
@@ -825,6 +826,7 @@ public class SubscriptionControllerTest extends TelephonyTest {
                 subIdList, mContext.getOpPackageName());
         assertNotEquals(null, groupId);
 
+        mSubscriptionControllerUT.notifySubscriptionInfoChanged();
         verify(mTelephonyRegisteryMock, times(2))
                 .notifyOpportunisticSubscriptionInfoChanged();
         List<SubscriptionInfo> opptSubList = mSubscriptionControllerUT
@@ -839,6 +841,7 @@ public class SubscriptionControllerTest extends TelephonyTest {
         mFakeTelephonyProvider.update(SubscriptionManager.CONTENT_URI, values,
                 SubscriptionManager.UNIQUE_KEY_SUBSCRIPTION_ID + "=" + 1, null);
         mSubscriptionControllerUT.refreshCachedActiveSubscriptionInfoList();
+        mSubscriptionControllerUT.notifySubscriptionInfoChanged();
 
         verify(mTelephonyRegisteryMock, times(3))
                 .notifyOpportunisticSubscriptionInfoChanged();
@@ -1002,5 +1005,29 @@ public class SubscriptionControllerTest extends TelephonyTest {
         clearInvocations(mDataEnabledSettings);
         mSubscriptionControllerUT.setAlwaysAllowMmsData(0, false);
         verify(mDataEnabledSettings).setAlwaysAllowMmsData(eq(false));
+    }
+
+    @Test
+    @SmallTest
+    public void testNameSourcePriority() throws Exception {
+        assertTrue(mSubscriptionControllerUT.getNameSourcePriority(
+                SubscriptionManager.NAME_SOURCE_USER_INPUT)
+                > mSubscriptionControllerUT.getNameSourcePriority(
+                        SubscriptionManager.NAME_SOURCE_CARRIER));
+
+        assertTrue(mSubscriptionControllerUT.getNameSourcePriority(
+                SubscriptionManager.NAME_SOURCE_CARRIER)
+                > mSubscriptionControllerUT.getNameSourcePriority(
+                SubscriptionManager.NAME_SOURCE_SIM_SPN));
+
+        assertTrue(mSubscriptionControllerUT.getNameSourcePriority(
+                SubscriptionManager.NAME_SOURCE_SIM_SPN)
+                > mSubscriptionControllerUT.getNameSourcePriority(
+                SubscriptionManager.NAME_SOURCE_SIM_PNN));
+
+        assertTrue(mSubscriptionControllerUT.getNameSourcePriority(
+                SubscriptionManager.NAME_SOURCE_SIM_PNN)
+                > mSubscriptionControllerUT.getNameSourcePriority(
+                SubscriptionManager.NAME_SOURCE_DEFAULT_SOURCE));
     }
 }
